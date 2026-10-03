@@ -19,6 +19,13 @@ html, body { margin: 0; height: 100%; background: #111; color: #bbb; font: 12px 
 #start input, #start select { font: inherit; font-size: 16px; padding: 8px; background: #1b1b1b;
   color: #eee; border: 1px solid #444; width: 100%; box-sizing: border-box; }
 #start button { font-size: 16px; padding: 10px; }
+#picked:empty::before { content: 'no models yet: search below'; color: #777; }
+.chip { display: inline-flex; gap: 6px; align-items: center; margin: 0 6px 6px 0; padding: 4px 4px 4px 8px;
+  border: 1px solid #444; background: #222; color: #eee; }
+#start .chip button { padding: 0 6px; font-size: 14px; }
+#matches { display: grid; }
+#start #matches button { text-align: left; padding: 8px; border-top: 0; font-size: 14px; }
+#matches small { display: block; color: #888; }
 button { font: inherit; background: #2a2a2a; color: #ccc; border: 1px solid #444; cursor: pointer; }
 </style>
 
@@ -253,19 +260,94 @@ addEventListener('load', async () => { for (const s of steps) {
      Your OpenRouter key stays in this tab and is only sent to OpenRouter.</p>
   <p style="color:#777">Built on Chris Webb's original blank-page harness.</p>
   <input name="key" type="password" placeholder="OpenRouter key (sk-or-...)" required autocomplete="off">
-  <input name="models" placeholder="models, comma separated">
+  <div id="picked"></div>
+  <div><input id="find" placeholder="add a model: type to search" autocomplete="off"><div id="matches"></div></div>
   <input name="dare" placeholder="a dare (optional)">
   <select name="mode"><option value="arena">side by side</option><option value="relay">relay: one page, passed hand to hand</option></select>
-  <input name="turns" type="number" min="1" max="200" value="40">
+  <label>turns per model<input name="turns" type="number" min="1" max="200" value="40"></label>
   <button>start</button>
 </form>
 <div id="lanes"></div>
 <script>
 const form = document.getElementById('start');
-form.models.value = DEFAULT_MODELS.join(', ');
+const find = document.getElementById('find');
+
+// Model picker: search OpenRouter's public model list, tap to add, x to remove.
+let picked = [], catalogue = [];
+try { picked = JSON.parse(localStorage.getItem('arena.models')) || []; } catch {}
+if (!Array.isArray(picked) || !picked.length) picked = [...DEFAULT_MODELS];
+
+const perM = n => +(n * 1e6).toFixed(2);
+const price = p => {
+  const i = +p?.prompt, o = +p?.completion;
+  if (!(i >= 0 && o >= 0)) return '';
+  return i || o ? `$${perM(i)} in / $${perM(o)} out per M tokens` : 'free';
+};
+
+function showPicked() {
+  const box = document.getElementById('picked');
+  box.replaceChildren(...picked.map(id => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.textContent = id;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.textContent = '×';
+    x.title = 'remove';
+    x.onclick = () => { picked = picked.filter(p => p != id); showPicked(); };
+    chip.append(x);
+    return chip;
+  }));
+  try { localStorage.setItem('arena.models', JSON.stringify(picked)); } catch {}
+}
+
+function matches() {
+  const words = find.value.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  return catalogue.filter(m => !picked.includes(m.id)
+    && words.every(w => (m.id + ' ' + m.name).toLowerCase().includes(w))).slice(0, 8);
+}
+
+function showMatches() {
+  document.getElementById('matches').replaceChildren(...matches().map(m => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = m.name;
+    const small = document.createElement('small');
+    small.textContent = [m.id, m.price].filter(Boolean).join(' · ');
+    b.append(small);
+    b.onclick = () => add(m.id);
+    return b;
+  }));
+}
+
+function add(id) {
+  if (id && !picked.includes(id)) picked.push(id);
+  find.value = '';
+  showPicked();
+  showMatches();
+  find.focus();
+}
+
+find.oninput = showMatches;
+find.onkeydown = e => {
+  if (e.key == 'Escape') { find.value = ''; showMatches(); }
+  if (e.key != 'Enter') return;
+  e.preventDefault();
+  // first match, or a typed id that isn't in the list (e.g. a brand-new model)
+  add(matches()[0]?.id || (find.value.includes('/') ? find.value.trim() : ''));
+};
+
+fetch('https://openrouter.ai/api/v1/models')
+  .then(r => r.json())
+  .then(d => { catalogue = d.data.map(m => ({ id: m.id, name: m.name || m.id, price: price(m.pricing) })); showMatches(); })
+  .catch(() => find.placeholder = 'add a model id, e.g. openai/gpt-6.1-sol (list unavailable)');
+showPicked();
+
 form.onsubmit = e => {
   e.preventDefault();
-  const models = form.models.value.split(',').map(m => m.trim()).filter(Boolean);
+  if (!picked.length) { find.focus(); return; }
+  const models = [...picked];
   form.remove();
   arena(form.key.value.trim(), { models, dare: form.dare.value.trim(), mode: form.mode.value, turns: +form.turns.value || 40 });
 };
