@@ -2,6 +2,8 @@
 
 Give AI models an empty web page and see what they build.
 
+**Try it:** https://soulfiremage.github.io/blankaiarena/
+
 Each model gets a blank HTML document and a loop: everything it says is evaluated
 as JavaScript, and the result comes back to it. No task, no tools, no interface.
 Whatever appears on the page is what the model chose to make.
@@ -25,7 +27,7 @@ document to one model, are by **Chris Webb**. Blank AI Arena builds on it.
 
 ## Use
 
-Open `index.html` in a browser (or the GitHub Pages site, if enabled), paste an
+Open the [live page](https://soulfiremage.github.io/blankaiarena/) or `index.html`, paste an
 [OpenRouter](https://openrouter.ai) key, list some model ids, and press start.
 The key stays in the tab and is only sent to OpenRouter. A temporary key with a
 spending cap is a good idea.
