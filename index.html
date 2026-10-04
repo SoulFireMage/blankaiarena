@@ -27,6 +27,9 @@ html, body { margin: 0; height: 100%; background: #111; color: #bbb; font: 12px 
 #start { max-width: 520px; margin: 10vh auto; padding: 0 16px; display: grid; gap: 10px; }
 #start h1 { margin: 0; color: #eee; font-size: 18px; }
 #start p { margin: 0; line-height: 1.5; }
+#start .remember { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#start .remember input { width: auto; }
+#start .remember button { font-size: 13px; padding: 2px 8px; margin-left: auto; }
 #start input, #start select { font: inherit; font-size: 16px; padding: 8px; background: #1b1b1b;
   color: #eee; border: 1px solid #444; width: 100%; box-sizing: border-box; }
 #start button { font-size: 16px; padding: 10px; }
@@ -188,13 +191,21 @@ function classify(code, message) {
   if (code == 400 || code == 404) return ['model', 'model unavailable', `wrong model id, or it can't be used with this page${m}`];
   if (code == 403) return ['model', 'request refused', `the provider refused the request${m}`];
   if (code == 408 || code == 429 || code >= 500) return ['network', 'provider busy or down', `try again shortly${m}`];
-  return ['bug', 'unexpected error', `HTTP ${code}${m}`];
+  // errors reported inside a 200 response carry a word, not a number
+  const w = String(code).toLowerCase();
+  if (/auth|key/.test(w)) return classify(401, message);
+  if (/credit|quota|payment|billing/.test(w)) return classify(402, message);
+  if (/not_found|invalid|unsupported|model/.test(w)) return classify(404, message);
+  if (/server|provider|unavailable|overload|timeout|rate/.test(w)) return classify(503, message);
+  return ['bug', 'unexpected error', `${code}${m}`];
 }
 
 const kTok = n => n < 1000 ? n + ' tok' : (n / 1000).toFixed(1) + 'k tok';
 
 async function runAgent(key, l, model, system, turns) {
-  const conversation = [{ role: 'system', content: system }];
+  // Some providers fail when there is no user message at all, so open with a neutral one.
+  const conversation = [{ role: 'system', content: system }, { role: 'user', content: 'Begin.' }];
+  let empty = 0;
   const fail = ([kind, short, detail]) => { l.status(kind, short); l.log(`${model} ✗ ${short}: ${detail}`); };
   l.skip = false;
   l.log(`${model}: starting, ${turns} turns`);
@@ -227,10 +238,12 @@ async function runAgent(key, l, model, system, turns) {
     } finally {
       clearInterval(ticker);
     }
-    if (!Array.isArray(response.output)) {
+    // A 200 can still be a failure: OpenRouter then sets status "failed" and an error object.
+    const e = response?.error;
+    if (e || response?.status == 'failed' || !Array.isArray(response?.output)) {
       console.log(model, response);
-      const e = response?.error;
-      return fail(e ? classify(+e.code || 0, e.message) : ['bug', 'unexpected response', JSON.stringify(response).slice(0, 300)]);
+      if (!e) return fail(['bug', 'unexpected response', JSON.stringify(response).slice(0, 300)]);
+      return fail(classify(+e.code || response.error_type || e.code || 0, e.message));
     }
     l.tokens += response.usage?.total_tokens || 0;
     l.log(`turn ${t}: replied after ${Math.round((Date.now() - t0) / 1000)}s`);
@@ -239,6 +252,11 @@ async function runAgent(key, l, model, system, turns) {
       conversation.push(item);
       console.log(model, item);
     }
+    const hasText = response.output.some(i => i.role == 'assistant' && i.content?.some(c => c.type == 'output_text'));
+    if (!hasText) {
+      l.log(`turn ${t}: the reply had no code in it`);
+      if (++empty >= 3) return fail(['model', 'model sends nothing', 'three replies in a row with no code in them']);
+    } else empty = 0;
     for (const item of response.output) {
       if (item.role != 'assistant') continue;
       for (const content of item.content) {
@@ -314,6 +332,8 @@ addEventListener('load', async () => { for (const s of steps) {
      Your OpenRouter key stays in this tab and is only sent to OpenRouter.</p>
   <p style="color:#777">Built on Chris Webb's original blank-page harness.</p>
   <input name="key" type="password" placeholder="OpenRouter key (sk-or-...)" required autocomplete="off">
+  <label class="remember"><input name="remember" type="checkbox" checked> remember my key on this device
+    <button type="button" id="forget" hidden>forget saved key</button></label>
   <div id="picked"></div>
   <div><input id="find" placeholder="add a model: type to search" autocomplete="off"><div id="matches"></div></div>
   <input name="dare" placeholder="a dare (optional)">
@@ -325,6 +345,17 @@ addEventListener('load', async () => { for (const s of steps) {
 <script>
 const form = document.getElementById('start');
 const find = document.getElementById('find');
+
+// The key is kept in this browser's localStorage (only on this device, only for this site) if you ask.
+const forget = document.getElementById('forget');
+try { form.key.value = localStorage.getItem('arena.key') || ''; } catch {}
+forget.hidden = !form.key.value;
+forget.onclick = () => {
+  try { localStorage.removeItem('arena.key'); } catch {}
+  form.key.value = '';
+  forget.hidden = true;
+  form.key.focus();
+};
 
 // Model picker: search OpenRouter's public model list, tap to add, x to remove.
 let picked = [], catalogue = [];
@@ -403,6 +434,10 @@ form.onsubmit = e => {
   if (!picked.length) { find.focus(); return; }
   const models = [...picked];
   form.remove();
+  try {
+    if (form.remember.checked) localStorage.setItem('arena.key', form.key.value.trim());
+    else localStorage.removeItem('arena.key');
+  } catch {}
   arena(form.key.value.trim(), { models, dare: form.dare.value.trim(), mode: form.mode.value, turns: +form.turns.value || 40 });
 };
 const _arena = arena;
