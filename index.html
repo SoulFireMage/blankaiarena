@@ -10,8 +10,19 @@ html, body { margin: 0; height: 100%; background: #111; color: #bbb; font: 12px 
 @media (max-width: 760px) { #lanes { height: auto; grid-auto-rows: 75vh; } }
 .lane { display: flex; flex-direction: column; min-height: 0; border: 1px solid #333; }
 .lane header { display: flex; gap: 6px; align-items: center; padding: 4px 6px; background: #1b1b1b; }
-.lane header b { color: #eee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lane header span { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lane header b { color: #eee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 35%; }
+.lane .state { flex: 1; min-width: 0; display: flex; gap: 6px; align-items: center; text-align: left;
+  background: none; border: 0; padding: 2px 0; color: #ccc; }
+.lane .state span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lane .state i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--c, #888); }
+.lane .state[data-k=working] i { --c: #3c3; animation: pulse 1.2s infinite; }
+.lane .state[data-k=done] i { --c: #ddd; }
+.lane .state[data-k=key] i, .lane .state[data-k=model] i { --c: #e33; }
+.lane .state[data-k=credit] i, .lane .state[data-k=network] i { --c: #f90; }
+.lane .state[data-k=bug] i { --c: #b5f; }
+@keyframes pulse { 50% { opacity: .3; } }
+.lane .log { max-height: 40%; overflow: auto; margin: 0; padding: 6px; background: #161616;
+  border-bottom: 1px solid #333; white-space: pre-wrap; word-break: break-word; }
 .lane iframe { flex: 1; width: 100%; border: 0; background: #fff; }
 #start { max-width: 520px; margin: 10vh auto; padding: 0 16px; display: grid; gap: 10px; }
 #start h1 { margin: 0; color: #eee; font-size: 18px; }
@@ -118,9 +129,9 @@ addEventListener('message', async e => {
 function makeLane(title) {
   const el = document.createElement('div');
   el.className = 'lane';
-  el.innerHTML = '<header><b></b><span></span>'
+  el.innerHTML = '<header><b></b><button class="state" title="tap for details"><i></i><span>starting</span></button>'
     + '<button data-a="skip">skip</button><button data-a="stop">stop</button>'
-    + '<button data-a="replay">replay</button></header>';
+    + '<button data-a="replay">replay</button></header><pre class="log" hidden></pre>';
   const frame = document.createElement('iframe');
   frame.sandbox = 'allow-scripts allow-modals allow-forms allow-pointer-lock allow-popups allow-downloads';
   frame.allow = 'fullscreen; autoplay; gamepad; xr-spatial-tracking';
@@ -131,7 +142,18 @@ function makeLane(title) {
 
   const l = { title, frame, steps: [], tokens: 0, stop: false, skip: false, pending: null, abort: null,
     ready: new Promise(r => frame.onload = r),
-    status: s => { const sp = el.querySelector('span'); sp.textContent = ' ' + s; sp.title = s; } };
+    // kind: working | done | key | credit | model | network | bug
+    status: (kind, text) => {
+      const st = el.querySelector('.state');
+      st.dataset.k = kind;
+      st.querySelector('span').textContent = text;
+    },
+    log: text => {
+      const pre = el.querySelector('.log'), stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+      pre.textContent = (pre.textContent + new Date().toTimeString().slice(0, 8) + '  ' + text + '\n').slice(-20000);
+      if (stick) pre.scrollTop = pre.scrollHeight;
+    } };
+  el.querySelector('.state').onclick = () => { const pre = el.querySelector('.log'); pre.hidden = !pre.hidden; };
   const halt = (all) => { l.skip = true; if (all) l.stop = true; l.abort?.abort(); l.pending?.(); };
   el.querySelector('[data-a=skip]').onclick = () => halt(false);
   el.querySelector('[data-a=stop]').onclick = () => halt(true);
@@ -158,14 +180,30 @@ const systemPrompt = (turns, context, dare) =>
     .replace('{TURNS}', turns).replace('{CONTEXT}', context)
   + (dare ? `\n\nThe user has left you a dare: ${dare}` : '');
 
+// Sort an OpenRouter failure into something a person can act on.
+function classify(code, message) {
+  const m = message ? ': ' + message : '';
+  if (code == 401) return ['key', 'key rejected', `the key is wrong, expired or revoked${m}`];
+  if (code == 402) return ['credit', 'out of credit', `the key works but has no credit left${m}`];
+  if (code == 400 || code == 404) return ['model', 'model unavailable', `wrong model id, or it can't be used with this page${m}`];
+  if (code == 403) return ['model', 'request refused', `the provider refused the request${m}`];
+  if (code == 408 || code == 429 || code >= 500) return ['network', 'provider busy or down', `try again shortly${m}`];
+  return ['bug', 'unexpected error', `HTTP ${code}${m}`];
+}
+
+const kTok = n => n < 1000 ? n + ' tok' : (n / 1000).toFixed(1) + 'k tok';
+
 async function runAgent(key, l, model, system, turns) {
   const conversation = [{ role: 'system', content: system }];
+  const fail = ([kind, short, detail]) => { l.status(kind, short); l.log(`${model} ✗ ${short}: ${detail}`); };
   l.skip = false;
+  l.log(`${model}: starting, ${turns} turns`);
   for (let t = 1; t <= turns && !l.skip; t++) {
     const t0 = Date.now(), waiting = () =>
-      l.status(`turn ${t}/${turns} · ${l.tokens} tok · thinking ${Math.round((Date.now() - t0) / 1000)}s`);
+      l.status('working', `thinking ${Math.round((Date.now() - t0) / 1000)}s · turn ${t}/${turns} · ${kTok(l.tokens)}`);
     waiting();
     const ticker = setInterval(waiting, 1000);
+    l.log(`turn ${t}: asking the model`);
     let response;
     try {
       l.abort = new AbortController();
@@ -175,24 +213,27 @@ async function runAgent(key, l, model, system, turns) {
         body: JSON.stringify({ model, cache_control: { type: 'ephemeral' }, input: conversation, store: false }),
       });
       if (!response.ok) {
-        l.status(`API error ${response.status} (see console)`);
-        console.log(model, await response.text());
-        return;
+        const text = await response.text();
+        let message = text.slice(0, 300);
+        try { message = JSON.parse(text).error?.message || message; } catch {}
+        console.log(model, text);
+        return fail(classify(response.status, message));
       }
       response = await response.json();
     } catch (error) {
-      l.status(`${l.skip ? 'stopped' : error.message}`);
       console.log(model, error);
-      return;
+      if (l.skip) { l.status('done', 'stopped'); l.log(`${model}: stopped`); return; }
+      return fail(['network', 'network problem', `couldn't reach OpenRouter (${error.message})`]);
     } finally {
       clearInterval(ticker);
     }
     if (!Array.isArray(response.output)) {
-      l.status(`unexpected response (see console)`);
       console.log(model, response);
-      return;
+      const e = response?.error;
+      return fail(e ? classify(+e.code || 0, e.message) : ['bug', 'unexpected response', JSON.stringify(response).slice(0, 300)]);
     }
     l.tokens += response.usage?.total_tokens || 0;
+    l.log(`turn ${t}: replied after ${Math.round((Date.now() - t0) / 1000)}s`);
 
     for (const item of response.output) {
       conversation.push(item);
@@ -203,18 +244,31 @@ async function runAgent(key, l, model, system, turns) {
       for (const content of item.content) {
         if (content.type != 'output_text') continue;
         const code = unfence(content.text);
+        const r0 = Date.now(), running = () => {
+          const secs = Math.round((Date.now() - r0) / 1000);
+          l.status('working', `running its code${secs > 10 ? ` ${secs}s · may be waiting for you` : ''} · turn ${t}/${turns}`);
+        };
+        running();
+        const runTicker = setInterval(running, 1000);
         const { ok, done, out } = await evalIn(l, code);
+        clearInterval(runTicker);
         if (ok) l.steps.push(code);
+        let brief = '';
+        try { const r = JSON.parse(out); brief = r.error ? '✗ ' + r.error : '✓'; if (r.backgroundErrors) brief += ` (${r.backgroundErrors.length} background error(s))`; }
+        catch { brief = ok ? '✓' : '✗'; }
+        l.log(`turn ${t}: its code ran ${brief}`.slice(0, 300));
         conversation.push({ type: 'message', role: 'user', content: out });
         console.log(model, out);
         if (done) {
-          l.status(`finished after ${t} turns · ${l.tokens} tok`);
+          l.status('done', `finished · ${t} turns · ${kTok(l.tokens)}`);
+          l.log(`${model}: finished by itself`);
           return;
         }
       }
     }
   }
-  l.status(`${l.skip ? 'stopped' : 'out of turns'} · ${l.tokens} tok`);
+  l.status('done', `${l.skip ? 'stopped' : 'out of turns'} · ${kTok(l.tokens)}`);
+  l.log(`${model}: ${l.skip ? 'stopped' : 'used all its turns'}`);
 }
 
 async function arena(key, { models = DEFAULT_MODELS, turns = 40, dare = '', mode = 'arena' } = {}) {
