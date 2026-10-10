@@ -37,9 +37,18 @@ html, body { margin: 0; height: 100%; background: #111; color: #bbb; font: 12px 
 .chip { display: inline-flex; gap: 6px; align-items: center; margin: 0 6px 6px 0; padding: 4px 4px 4px 8px;
   border: 1px solid #444; background: #222; color: #eee; }
 #start .chip button { padding: 0 6px; font-size: 14px; }
-#matches { display: grid; }
-#start #matches button { text-align: left; padding: 8px; border-top: 0; font-size: 14px; }
-#matches small { display: block; color: #888; }
+#levels { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+#start #levels button { font-size: 13px; padding: 4px 8px; }
+#start #levels button[aria-pressed=true] { background: #445; color: #fff; border-color: #778; }
+#start #levels .auto { margin-left: auto; border-color: #686; }
+#matches { display: grid; max-height: 280px; overflow-y: auto; border: 1px solid #333; border-top: 0; }
+#start #matches button { display: grid; grid-template-columns: 34px 1fr; gap: 0 8px; text-align: left;
+  padding: 7px 8px; border: 0; border-bottom: 1px solid #262626; font-size: 14px; background: #1a1a1a; }
+#start #matches button.on { background: #233; }
+#matches .score { grid-row: span 2; align-self: center; text-align: center; font-weight: bold; color: #9cf; }
+#matches .score.none { color: #555; font-weight: normal; }
+#matches small { color: #888; }
+#matches .empty { padding: 10px; color: #777; }
 button { font: inherit; background: #2a2a2a; color: #ccc; border: 1px solid #444; cursor: pointer; }
 </style>
 
@@ -335,7 +344,13 @@ addEventListener('load', async () => { for (const s of steps) {
   <label class="remember"><input name="remember" type="checkbox" checked> remember my key on this device
     <button type="button" id="forget" hidden>forget saved key</button></label>
   <div id="picked"></div>
-  <div><input id="find" placeholder="add a model: type to search" autocomplete="off"><div id="matches"></div></div>
+  <div>
+    <div id="levels"></div>
+    <input id="find" placeholder="search, or just scroll and tap" autocomplete="off">
+    <div id="matches"><div class="empty">loading models…</div></div>
+    <p style="color:#777; font-size: 12px; margin-top: 4px">Numbers are the Artificial Analysis intelligence
+      index (higher is smarter; – means no score yet). Prices are per million tokens in / out.</p>
+  </div>
   <input name="dare" placeholder="a dare (optional)">
   <select name="mode"><option value="arena">side by side</option><option value="relay">relay: one page, passed hand to hand</option></select>
   <label>turns per model<input name="turns" type="number" min="1" max="200" value="40"></label>
@@ -357,17 +372,27 @@ forget.onclick = () => {
   form.key.focus();
 };
 
-// Model picker: search OpenRouter's public model list, tap to add, x to remove.
-let picked = [], catalogue = [];
+// Model picker. OpenRouter's public model list, sorted by the Artificial Analysis
+// intelligence index it carries. Pick a level, tap models to add or remove them,
+// or let "add 4" choose the best few from different makers.
+let picked = [], catalogue = [], level = 'all';
 try { picked = JSON.parse(localStorage.getItem('arena.models')) || []; } catch {}
 if (!Array.isArray(picked) || !picked.length) picked = [...DEFAULT_MODELS];
+try { level = localStorage.getItem('arena.level') || 'all'; } catch {}
+
+const LEVELS = [
+  ['all', 'all', () => true],
+  ['top', 'top · 50+', m => m.score >= 50],
+  ['strong', 'strong · 40s', m => m.score >= 40 && m.score < 50],
+  ['good', 'good · 30s', m => m.score >= 30 && m.score < 40],
+  ['light', 'light · under 30', m => m.score < 30],
+  ['cheap', 'cheap · ≤ $1/M out', m => m.out != null && m.out <= 1],
+  ['free', 'free', m => m.out === 0 && m.in === 0],
+];
+const levelTest = () => (LEVELS.find(l => l[0] == level) || LEVELS[0])[2];
 
 const perM = n => +(n * 1e6).toFixed(2);
-const price = p => {
-  const i = +p?.prompt, o = +p?.completion;
-  if (!(i >= 0 && o >= 0)) return '';
-  return i || o ? `$${perM(i)} in / $${perM(o)} out per M tokens` : 'free';
-};
+const priceLabel = m => m.in == null ? '' : m.in || m.out ? `$${m.in} / $${m.out} per M` : 'free';
 
 function showPicked() {
   const box = document.getElementById('picked');
@@ -379,39 +404,91 @@ function showPicked() {
     x.type = 'button';
     x.textContent = '×';
     x.title = 'remove';
-    x.onclick = () => { picked = picked.filter(p => p != id); showPicked(); };
+    x.onclick = () => toggle(id);
     chip.append(x);
     return chip;
   }));
+  if (picked.length > 1) {
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'chip';
+    clear.textContent = 'clear all';
+    clear.onclick = () => { picked = []; showPicked(); showMatches(); };
+    box.append(clear);
+  }
   try { localStorage.setItem('arena.models', JSON.stringify(picked)); } catch {}
 }
 
+function showLevels() {
+  const box = document.getElementById('levels');
+  box.replaceChildren(...LEVELS.map(([id, label]) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.setAttribute('aria-pressed', id == level);
+    b.onclick = () => { level = id; try { localStorage.setItem('arena.level', id); } catch {} showLevels(); showMatches(); };
+    return b;
+  }));
+  const auto = document.createElement('button');
+  auto.type = 'button';
+  auto.className = 'auto';
+  auto.textContent = '+ add 4 for me';
+  auto.title = 'the highest-scoring models in this list, from different makers, skipping any over $15 per M output tokens';
+  auto.onclick = () => {
+    // prefer makers not already in the arena, so the four are as different as possible
+    const makers = new Set(picked.map(id => id.split('/')[0]));
+    // skip the very expensive ones: a long run on a $50/M model can empty a small key; they can still be tapped
+    const pool = matches().filter(m => !picked.includes(m.id) && m.score != null && !(m.out > 15));
+    const chosen = [];
+    for (const fresh of [true, false])
+      for (const m of pool) {
+        const maker = m.id.split('/')[0];
+        if (chosen.length >= 4 || chosen.includes(m) || (fresh && makers.has(maker))) continue;
+        chosen.push(m);
+        makers.add(maker);
+      }
+    picked.push(...chosen.map(m => m.id));
+    showPicked();
+    showMatches();
+  };
+  box.append(auto);
+}
+
 function matches() {
-  const words = find.value.toLowerCase().split(/\s+/).filter(Boolean);
-  if (!words.length) return [];
-  return catalogue.filter(m => !picked.includes(m.id)
-    && words.every(w => (m.id + ' ' + m.name).toLowerCase().includes(w))).slice(0, 8);
+  const words = find.value.toLowerCase().split(/\s+/).filter(Boolean), test = levelTest();
+  return catalogue.filter(m => test(m) && words.every(w => (m.id + ' ' + m.name).toLowerCase().includes(w)));
 }
 
 function showMatches() {
-  document.getElementById('matches').replaceChildren(...matches().map(m => {
+  const list = matches().slice(0, 80), box = document.getElementById('matches');
+  if (!catalogue.length) return;
+  if (!list.length) {
+    box.innerHTML = '<div class="empty">nothing here: try another level, or type a full model id and press Enter</div>';
+    return;
+  }
+  box.replaceChildren(...list.map(m => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.textContent = m.name;
+    b.className = picked.includes(m.id) ? 'on' : '';
+    b.title = m.score == null ? 'no intelligence score published' : 'Artificial Analysis intelligence index';
+    const score = document.createElement('span');
+    score.className = 'score' + (m.score == null ? ' none' : '');
+    score.textContent = m.score == null ? '–' : Math.floor(m.score);   // floor, so 49.9 reads as a 40s model
+    const name = document.createElement('span');
+    name.textContent = (picked.includes(m.id) ? '✓ ' : '') + m.name;
     const small = document.createElement('small');
-    small.textContent = [m.id, m.price].filter(Boolean).join(' · ');
-    b.append(small);
-    b.onclick = () => add(m.id);
+    small.textContent = [m.id, priceLabel(m)].filter(Boolean).join(' · ');
+    b.append(score, name, small);
+    b.onclick = () => toggle(m.id);
     return b;
   }));
 }
 
-function add(id) {
-  if (id && !picked.includes(id)) picked.push(id);
-  find.value = '';
+function toggle(id) {
+  if (!id) return;
+  picked = picked.includes(id) ? picked.filter(p => p != id) : [...picked, id];
   showPicked();
   showMatches();
-  find.focus();
 }
 
 find.oninput = showMatches;
@@ -419,14 +496,32 @@ find.onkeydown = e => {
   if (e.key == 'Escape') { find.value = ''; showMatches(); }
   if (e.key != 'Enter') return;
   e.preventDefault();
-  // first match, or a typed id that isn't in the list (e.g. a brand-new model)
-  add(matches()[0]?.id || (find.value.includes('/') ? find.value.trim() : ''));
+  // first unpicked match, or a typed id that isn't in the list (e.g. a brand-new model)
+  const id = matches().find(m => !picked.includes(m.id))?.id || (find.value.includes('/') ? find.value.trim() : '');
+  if (id && !picked.includes(id)) toggle(id);
+  find.value = '';
+  showMatches();
 };
 
 fetch('https://openrouter.ai/api/v1/models')
   .then(r => r.json())
-  .then(d => { catalogue = d.data.map(m => ({ id: m.id, name: m.name || m.id, price: price(m.pricing) })); showMatches(); })
-  .catch(() => find.placeholder = 'add a model id, e.g. openai/gpt-6.1-sol (list unavailable)');
+  .then(d => {
+    catalogue = d.data
+      // :batch variants are slow bulk copies of other models, no use in a live loop
+      .filter(m => !m.id.endsWith(':batch') && (m.architecture?.output_modalities || ['text']).includes('text'))
+      .map(m => {
+        const i = +m.pricing?.prompt, o = +m.pricing?.completion, priced = i >= 0 && o >= 0;
+        return { id: m.id, name: m.name || m.id, created: m.created || 0,
+          score: m.benchmarks?.artificial_analysis?.intelligence_index ?? null,
+          in: priced ? perM(i) : null, out: priced ? perM(o) : null };
+      })
+      .sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || b.created - a.created);
+    showMatches();
+  })
+  .catch(() => {
+    document.getElementById('matches').innerHTML = '<div class="empty">couldn\'t load the model list: type a full model id, e.g. openai/gpt-6.1-sol, and press Enter</div>';
+  });
+showLevels();
 showPicked();
 
 form.onsubmit = e => {
