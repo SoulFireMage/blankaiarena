@@ -55,7 +55,10 @@ button { font: inherit; background: #2a2a2a; color: #ccc; border: 1px solid #444
 <template id="system">
 You are running in a simple harness in an otherwise blank HTML document,
 inside a sandboxed iframe. Each assistant message is evaluated as a
-javascript expression, as `(async () => (YOUR_MESSAGE))()`; the result
+javascript expression, as `(async () => (YOUR_MESSAGE))()` (or, if it is
+statements rather than an expression, as an async function body: use
+`return` to send a value back, and `window.x = ...` for anything you want
+to keep between turns); the result
 (or the error) is returned to you as a new user message, along with any
 uncaught errors your code raised in the background since your last turn.
 You can examine the document with `document.documentElement.innerHTML`.
@@ -69,8 +72,10 @@ but you would need to build an interface to do that. If you do this,
 remember the agent loop only pauses for user input when evaluating a
 promise that blocks waiting for it.
 
-Everything you send is evaluated as code, so prose is a syntax error: to
-talk to the user, put words on the page. When you have finished, evaluate
+Everything you send is evaluated as code, so prose or raw HTML is a syntax
+error: to put HTML on the page, assign it, e.g.
+`document.body.innerHTML = '<h1>hello</h1>'`, and to talk to the user, put
+words on the page. When you have finished, evaluate
 `done()` (or `done('a parting note')`) and the loop will stop calling you.
 
 You have {TURNS} turns. {CONTEXT}
@@ -128,12 +133,19 @@ addEventListener('message', async e => {
   if (e.source !== parent) return;
   const { id, code } = e.data;
   let r, ok = true;
-  try { r = { result: await (0, eval)('(async () => (' + code + '))()') }; }
+  // An expression, as in the original harness. If it doesn't parse as one but does as
+  // statements, run it as a function body instead (checked without running anything).
+  let src = '(async () => (' + code + '))()', unparsable = false;
+  try { new Function(src); } catch (e) {
+    const body = '(async () => {' + code + '\\n})()';
+    try { new Function(body); src = body; } catch { unparsable = true; }
+  }
+  try { r = { result: await (0, eval)(src) }; }
   catch (err) {
     r = { error: String(err && err.message || err) }; ok = false;
-    if (err instanceof SyntaxError) r.hint = 'your whole message is evaluated as one JavaScript expression';
+    if (unparsable) r.hint = 'your whole message must be JavaScript: one expression, or statements (use return for a result)';
   }
-  parent.postMessage({ id, ok, done: finished, out: pack(r) }, '*');
+  parent.postMessage({ id, ok, done: finished, src, out: pack(r) }, '*');
   finished = false;
 });
 <\/script>`;
@@ -142,6 +154,7 @@ function makeLane(title) {
   const el = document.createElement('div');
   el.className = 'lane';
   el.innerHTML = '<header><b></b><button class="state" title="tap for details"><i></i><span>starting</span></button>'
+    + '<button data-a="nudge" hidden title="ask the model to keep going">nudge</button>'
     + '<button data-a="skip">skip</button><button data-a="stop">stop</button>'
     + '<button data-a="replay">replay</button></header><pre class="log" hidden></pre>';
   const frame = document.createElement('iframe');
@@ -170,6 +183,9 @@ function makeLane(title) {
   el.querySelector('[data-a=skip]').onclick = () => halt(false);
   el.querySelector('[data-a=stop]').onclick = () => halt(true);
   el.querySelector('[data-a=replay]').onclick = () => exportReplay(l);
+  const nudge = el.querySelector('[data-a=nudge]');
+  l.offerNudge = fn => { nudge.hidden = false; nudge.onclick = () => { nudge.hidden = true; fn(); }; };
+  l.hideNudge = () => nudge.hidden = true;
   return l;
 }
 
@@ -185,7 +201,38 @@ function evalIn(l, code) {
 }
 
 // Models sometimes wrap their code in a markdown fence; the original harness would choke on it.
-const unfence = t => (t.trim().match(/^```[\w-]*\n([\s\S]*?)\n?```$/) || [, t])[1];
+// Some wrap it in pseudo tool-call markup (<invoke><parameter>code</parameter>...) and even
+// invent a tool result after it: take the first non-empty parameter.
+function unfence(t) {
+  t = t.trim();
+  const fence = t.match(/^```[\w-]*\n([\s\S]*?)\n?```/);
+  if (fence) return fence[1];
+  if (t.startsWith('<') && /<parameter\b/.test(t)) {
+    const blocks = [...t.matchAll(/<parameter\b[^>]*>([\s\S]*?)(?=<\/?parameter\b|<\/invoke>|$)/g)]
+      .map(m => m[1].trim()).filter(Boolean);
+    if (blocks.length) return blocks[0];
+  }
+  // Prose with a code block in it ("Here's my plan:\n```js ...```"): run the first block.
+  // Checked before parsing the whole, because "Plan: ```...```" happens to be valid JS
+  // (a label and a template string) that does nothing useful.
+  // Only when the text before the block looks like prose, not code (so markdown inside a
+  // JS string is left alone).
+  const inner = t.match(/```[\w-]*\n([\s\S]*?)\n?```/);
+  if (inner && !/[=(;{`]/.test(t.slice(0, inner.index)) && parses(inner[1])) return inner[1];
+  // A made-up wrapper tag around code: <render> ... </render> (but not real HTML like <h1>hi</h1>)
+  if (!parses(t)) {
+    const tag = t.match(/^<([a-z_][\w-]*)>\s*([\s\S]*?)\s*(?:<\/\1>)?$/i);
+    if (tag && /[=(;{]/.test(tag[2]) && parses(tag[2])) return tag[2];
+  }
+  return t;
+}
+
+// Would this run as an expression, or as statements? (Compiles only; runs nothing.)
+function parses(code) {
+  for (const src of [`(async () => (${code}))()`, `(async () => {${code}\n})()`])
+    try { new Function(src); return true; } catch {}
+  return false;
+}
 
 const systemPrompt = (turns, context, dare) =>
   document.getElementById('system').innerHTML.trim()
@@ -209,50 +256,79 @@ function classify(code, message) {
   return ['bug', 'unexpected error', `${code}${m}`];
 }
 
+const RETRY_WAITS = [5, 15, 30];   // seconds
 const kTok = n => n < 1000 ? n + ' tok' : (n / 1000).toFixed(1) + 'k tok';
 
-async function runAgent(key, l, model, system, turns) {
+async function runAgent(key, l, model, system, turns, resume) {
   // Some providers fail when there is no user message at all, so open with a neutral one.
-  const conversation = [{ role: 'system', content: system }, { role: 'user', content: 'Begin.' }];
+  const conversation = resume?.conversation || [{ role: 'system', content: system }, { role: 'user', content: 'Begin.' }];
   let empty = 0;
   const fail = ([kind, short, detail]) => { l.status(kind, short); l.log(`${model} ✗ ${short}: ${detail}`); };
+  // In arena mode a finished lane can be nudged: same conversation, a note from the user, more turns if needed.
+  const nudgeable = t => l.solo && l.offerNudge(() => {
+    const more = Math.max(turns - t, 10), total = t + more;
+    conversation.push({ role: 'user', content: `The user pressed "nudge": they would like you to keep going. You have ${more} more turns.` });
+    l.log(`${model}: nudged, ${more} more turns`);
+    runAgent(key, l, model, system, total, { conversation, t: t + 1 });
+  });
   l.skip = false;
-  l.log(`${model}: starting, ${turns} turns`);
-  for (let t = 1; t <= turns && !l.skip; t++) {
+  l.hideNudge?.();
+  if (!resume) l.log(`${model}: starting, ${turns} turns`);
+  let t = resume?.t || 1;
+  for (; t <= turns && !l.skip; t++) {
     const t0 = Date.now(), waiting = () =>
       l.status('working', `thinking ${Math.round((Date.now() - t0) / 1000)}s · turn ${t}/${turns} · ${kTok(l.tokens)}`);
-    waiting();
-    const ticker = setInterval(waiting, 1000);
     l.log(`turn ${t}: asking the model`);
-    let response;
-    try {
-      l.abort = new AbortController();
-      response = await fetch('https://openrouter.ai/api/v1/responses', {
-        method: 'POST', signal: l.abort.signal,
-        headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, cache_control: { type: 'ephemeral' }, input: conversation, store: false }),
-      });
-      if (!response.ok) {
-        const text = await response.text();
-        let message = text.slice(0, 300);
-        try { message = JSON.parse(text).error?.message || message; } catch {}
-        console.log(model, text);
-        return fail(classify(response.status, message));
+    // One request. Returns [response, null] or [null, [kind, short, detail]].
+    const ask = async () => {
+      waiting();
+      const ticker = setInterval(waiting, 1000);
+      try {
+        l.abort = new AbortController();
+        const res = await fetch('https://openrouter.ai/api/v1/responses', {
+          method: 'POST', signal: l.abort.signal,
+          headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, cache_control: { type: 'ephemeral' }, input: conversation, store: false }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          let message = text.slice(0, 300);
+          try { message = JSON.parse(text).error?.message || message; } catch {}
+          console.log(model, text);
+          return [null, classify(res.status, message)];
+        }
+        const r = await res.json();
+        // A 200 can still be a failure: OpenRouter then sets status "failed" and an error object.
+        const e = r?.error;
+        if (e || r?.status == 'failed' || !Array.isArray(r?.output)) {
+          console.log(model, r);
+          return [null, e ? classify(+e.code || r.error_type || e.code || 0, e.message)
+                          : ['bug', 'unexpected response', JSON.stringify(r).slice(0, 300)]];
+        }
+        return [r, null];
+      } catch (error) {
+        console.log(model, error);
+        return [null, l.skip ? null : ['network', 'network problem', `couldn't reach OpenRouter (${error.message})`]];
+      } finally {
+        clearInterval(ticker);
       }
-      response = await response.json();
-    } catch (error) {
-      console.log(model, error);
-      if (l.skip) { l.status('done', 'stopped'); l.log(`${model}: stopped`); return; }
-      return fail(['network', 'network problem', `couldn't reach OpenRouter (${error.message})`]);
-    } finally {
-      clearInterval(ticker);
+    };
+    // Providers hiccup a lot (timeouts, 5xx, rate limits): retry those a few times before giving up.
+    let response, problem;
+    for (let attempt = 0; ; attempt++) {
+      [response, problem] = await ask();
+      if (!problem || problem[0] != 'network' || attempt >= RETRY_WAITS.length || l.skip) break;
+      const wait = RETRY_WAITS[attempt];
+      l.log(`turn ${t}: ${problem[1]} (${problem[2]}), retrying in ${wait}s`);
+      for (let left = wait; left > 0 && !l.skip; left--) {
+        l.status('network', `${problem[1]} · retrying in ${left}s (${attempt + 1}/${RETRY_WAITS.length})`);
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      if (l.skip) break;
     }
-    // A 200 can still be a failure: OpenRouter then sets status "failed" and an error object.
-    const e = response?.error;
-    if (e || response?.status == 'failed' || !Array.isArray(response?.output)) {
-      console.log(model, response);
-      if (!e) return fail(['bug', 'unexpected response', JSON.stringify(response).slice(0, 300)]);
-      return fail(classify(+e.code || response.error_type || e.code || 0, e.message));
+    if (!response) {
+      if (l.skip) { l.status('done', 'stopped'); l.log(`${model}: stopped`); return; }
+      return fail(problem);
     }
     l.tokens += response.usage?.total_tokens || 0;
     l.log(`turn ${t}: replied after ${Math.round((Date.now() - t0) / 1000)}s`);
@@ -277,9 +353,11 @@ async function runAgent(key, l, model, system, turns) {
         };
         running();
         const runTicker = setInterval(running, 1000);
-        const { ok, done, out } = await evalIn(l, code);
+        const { ok, done, src, out } = await evalIn(l, code);
         clearInterval(runTicker);
-        if (ok) l.steps.push(code);
+        if (ok) l.steps.push(src || code);
+        if (code != content.text.trim()) l.log(`turn ${t}: took the code out of its wrapper`);
+        l.log(`turn ${t}: code: ${code.replace(/\s+/g, ' ').slice(0, 90)}`);
         let brief = '';
         try { const r = JSON.parse(out); brief = r.error ? '✗ ' + r.error : '✓'; if (r.backgroundErrors) brief += ` (${r.backgroundErrors.length} background error(s))`; }
         catch { brief = ok ? '✓' : '✗'; }
@@ -289,6 +367,7 @@ async function runAgent(key, l, model, system, turns) {
         if (done) {
           l.status('done', `finished · ${t} turns · ${kTok(l.tokens)}`);
           l.log(`${model}: finished by itself`);
+          nudgeable(t);
           return;
         }
       }
@@ -296,6 +375,7 @@ async function runAgent(key, l, model, system, turns) {
   }
   l.status('done', `${l.skip ? 'stopped' : 'out of turns'} · ${kTok(l.tokens)}`);
   l.log(`${model}: ${l.skip ? 'stopped' : 'used all its turns'}`);
+  if (!l.skip) nudgeable(t - 1);
 }
 
 async function arena(key, { models = DEFAULT_MODELS, turns = 40, dare = '', mode = 'arena' } = {}) {
@@ -311,6 +391,7 @@ async function arena(key, { models = DEFAULT_MODELS, turns = 40, dare = '', mode
   }
   await Promise.all(models.map(async model => {
     const l = makeLane(model);
+    l.solo = true;
     await l.ready;
     await runAgent(key, l, model, systemPrompt(turns, CONTEXT.arena, dare), turns);
   }));
@@ -325,7 +406,7 @@ function exportReplay(l) {
 const steps = ${steps};
 const done = note => note;
 addEventListener('load', async () => { for (const s of steps) {
-  try { await (0, eval)('(async () => (' + s + '))()'); } catch (e) { console.warn(e); }
+  try { await (0, eval)(s); } catch (e) { console.warn(e); }
 } });
 <\/script>`;
   const a = document.createElement('a');
