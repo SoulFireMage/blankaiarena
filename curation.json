@@ -1,0 +1,16 @@
+{
+  "_about": "Shared notes on how models behave in Blank Arena. favourites get a star, avoid entries are greyed out and skipped by 'add 4' (but can still be picked), notes just show. Keys are OpenRouter model ids, values are a short note. Suggest changes with the links in a lane's log, or edit this file.",
+  "favourites": {
+    "anthropic/claude-sonnet-5.5": "built a pointer-reactive particle universe from a 'surprise me' dare",
+    "openai/gpt-6.1-sol": "built a polished 'Impossible Aquarium' with sound, then finished cleanly",
+    "inclusionai/ling-3.1-flash": "free, and built a full generative flow-field toy with controls; its provider is often busy, so retries help"
+  },
+  "avoid": {
+    "z-ai/glm-5.3-flash": "one run: 9 minutes on its first turn, then kept replying in prose instead of code"
+  },
+  "notes": {
+    "anthropic/claude-haiku-5.5": "tends to treat the blank page as 'waiting for instructions' and stop; try nudge or a dare",
+    "xiaomi/mimo-v2.6-pro": "slow (1-2 minutes per turn) and its provider times out fairly often",
+    "openai/gpt-6-luna": "in one run it waited a long time for input; answer it or press nudge"
+  }
+}

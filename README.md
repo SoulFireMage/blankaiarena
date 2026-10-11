@@ -24,6 +24,19 @@ document to one model, are by **Chris Webb**. Blank AI Arena builds on it.
 - **Sandboxing:** each model runs in a sandboxed iframe, so its code cannot read
   your API key.
 - **`done()`:** a model can end its own run instead of using up its turns.
+- **Model picker:** OpenRouter's models sorted by the Artificial Analysis intelligence
+  index, with levels (top, strong, good, light, cheap, free, favourites) and "add 4 for me".
+- **Lane controls:** each lane has a coloured status (tap it for a log), **nudge** to ask a
+  model to keep going (after it finishes, stops, or sits waiting on you), **retry** after an
+  error, **↻** to restart with a fresh page, and on desktop **⇄** to swap that lane to
+  another model.
+
+## Shared favourites and avoid list
+
+[`curation.json`](curation.json) holds shared notes on how models behave here:
+`favourites` get a ★, `avoid` entries are greyed out and skipped by "add 4" (they can still
+be picked), and `notes` just show. Each lane's log has links that open a pre-filled GitHub
+issue to suggest a model for either list; edit the file to accept one.
 
 ## Use
 

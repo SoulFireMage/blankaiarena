@@ -21,7 +21,19 @@ html, body { margin: 0; height: 100%; background: #111; color: #bbb; font: 12px 
 .lane .state[data-k=credit] i, .lane .state[data-k=network] i { --c: #f90; }
 .lane .state[data-k=bug] i { --c: #b5f; }
 @keyframes pulse { 50% { opacity: .3; } }
-.lane .log { max-height: 40%; overflow: auto; margin: 0; padding: 6px; background: #161616;
+.lane header button { padding: 1px 6px; }
+.lane .swap { padding: 6px; background: #161616; border-bottom: 1px solid #333; }
+.lane .swap input { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 6px;
+  background: #1b1b1b; color: #eee; border: 1px solid #444; }
+.lane .swap div { max-height: 220px; overflow-y: auto; }
+.lane .swap div button { display: block; width: 100%; text-align: left; padding: 5px 6px; border: 0;
+  border-bottom: 1px solid #262626; background: #1a1a1a; }
+.lane .drawer { max-height: 40%; overflow: auto; background: #161616; border-bottom: 1px solid #333; }
+.lane .drawer p { margin: 0; padding: 0 6px 6px; }
+.lane .drawer a { color: #9cf; margin-right: 12px; }
+@media (max-width: 760px) { .lane [data-a=swap] { display: none; } }
+.dim { opacity: .55; }
+.lane .log { max-height: none; overflow: auto; margin: 0; padding: 6px; background: #161616;
   border-bottom: 1px solid #333; white-space: pre-wrap; word-break: break-word; }
 .lane iframe { flex: 1; width: 100%; border: 0; background: #fff; }
 #start { max-width: 520px; margin: 10vh auto; padding: 0 16px; display: grid; gap: 10px; }
@@ -145,27 +157,31 @@ addEventListener('message', async e => {
     r = { error: String(err && err.message || err) }; ok = false;
     if (unparsable) r.hint = 'your whole message must be JavaScript: one expression, or statements (use return for a result)';
   }
-  parent.postMessage({ id, ok, done: finished, src, out: pack(r) }, '*');
+  parent.postMessage({ id, ok, ran: !unparsable, done: finished, src, out: pack(r) }, '*');
   finished = false;
 });
 <\/script>`;
 
-function makeLane(title) {
+function makeLane(title, before) {
   const el = document.createElement('div');
   el.className = 'lane';
   el.innerHTML = '<header><b></b><button class="state" title="tap for details"><i></i><span>starting</span></button>'
-    + '<button data-a="nudge" hidden title="ask the model to keep going">nudge</button>'
-    + '<button data-a="skip">skip</button><button data-a="stop">stop</button>'
-    + '<button data-a="replay">replay</button></header><pre class="log" hidden></pre>';
+    + '<button data-a="act" hidden></button>'
+    + '<button data-a="restart" hidden title="start this lane again with a fresh page">↻</button>'
+    + '<button data-a="swap" hidden title="start this lane again with a different model">⇄</button>'
+    + '<button data-a="skip" title="move on to the next model">skip</button><button data-a="stop">stop</button>'
+    + '<button data-a="replay" title="download a file that replays what this model did">replay</button></header>'
+    + '<div class="swap" hidden><input placeholder="swap to: search models"><div></div></div>'
+    + '<div class="drawer" hidden><pre class="log"></pre><p class="suggest"></p></div>';
   const frame = document.createElement('iframe');
   frame.sandbox = 'allow-scripts allow-modals allow-forms allow-pointer-lock allow-popups allow-downloads';
   frame.allow = 'fullscreen; autoplay; gamepad; xr-spatial-tracking';
   frame.srcdoc = BRIDGE;
   el.append(frame);
-  document.getElementById('lanes').append(el);
+  if (before) before.before(el); else document.getElementById('lanes').append(el);
   el.querySelector('b').textContent = title;
 
-  const l = { title, frame, steps: [], tokens: 0, stop: false, skip: false, pending: null, abort: null,
+  const l = { title, el, frame, steps: [], tokens: 0, stop: false, skip: false, pending: null, abort: null,
     ready: new Promise(r => frame.onload = r),
     // kind: working | done | key | credit | model | network | bug
     status: (kind, text) => {
@@ -178,15 +194,80 @@ function makeLane(title) {
       pre.textContent = (pre.textContent + new Date().toTimeString().slice(0, 8) + '  ' + text + '\n').slice(-20000);
       if (stick) pre.scrollTop = pre.scrollHeight;
     } };
-  el.querySelector('.state').onclick = () => { const pre = el.querySelector('.log'); pre.hidden = !pre.hidden; };
-  const halt = (all) => { l.skip = true; if (all) l.stop = true; l.abort?.abort(); l.pending?.(); };
-  el.querySelector('[data-a=skip]').onclick = () => halt(false);
-  el.querySelector('[data-a=stop]').onclick = () => halt(true);
-  el.querySelector('[data-a=replay]').onclick = () => exportReplay(l);
-  const nudge = el.querySelector('[data-a=nudge]');
-  l.offerNudge = fn => { nudge.hidden = false; nudge.onclick = () => { nudge.hidden = true; fn(); }; };
-  l.hideNudge = () => nudge.hidden = true;
+  const $ = sel => el.querySelector(sel);
+  $('.state').onclick = () => { $('.drawer').hidden = !$('.drawer').hidden; showSuggest(l); };
+  l.halt = all => { l.skip = true; if (all) l.stop = true; l.abort?.abort(); l.pending?.(); };
+  $('[data-a=skip]').onclick = () => l.halt(false);
+  $('[data-a=stop]').onclick = () => l.halt(true);
+  $('[data-a=replay]').onclick = () => exportReplay(l);
+  // the one contextual action: "nudge" (keep going) or "retry" (after an error)
+  const act = $('[data-a=act]');
+  l.offer = (label, title, fn) => {
+    act.textContent = label; act.title = title; act.hidden = false;
+    act.onclick = () => { act.hidden = true; fn(); };
+  };
+  l.hideOffer = () => act.hidden = true;
+  // arena lanes can be restarted, or swapped to another model (desktop only, via CSS)
+  l.makeSolo = () => {
+    l.solo = true;
+    $('[data-a=skip]').hidden = true;
+    $('[data-a=restart]').hidden = $('[data-a=swap]').hidden = false;
+    $('[data-a=restart]').onclick = () => restartLane(l, l.model);
+    $('[data-a=swap]').onclick = () => {
+      $('.swap').hidden = !$('.swap').hidden;
+      if (!$('.swap').hidden) { $('.swap input').focus(); fillSwap(); }
+    };
+    const fillSwap = () => {
+      const words = $('.swap input').value.toLowerCase().split(/\s+/).filter(Boolean);
+      const list = catalogue.filter(m => m.id != l.model && words.every(w => (m.id + ' ' + m.name).toLowerCase().includes(w))).slice(0, 40);
+      $('.swap div').replaceChildren(...list.map(m => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = curation.avoid[m.id] ? 'dim' : '';
+        b.textContent = `${m.score == null ? '–' : Math.floor(m.score)}  ${mark(m.id)}${m.name}  ${priceLabel(m)}`;
+        b.title = noteFor(m.id) || m.id;
+        b.onclick = () => restartLane(l, m.id);
+        return b;
+      }));
+    };
+    $('.swap input').oninput = fillSwap;
+    $('.swap input').onkeydown = e => {
+      if (e.key == 'Enter' && $('.swap input').value.includes('/')) restartLane(l, $('.swap input').value.trim());
+    };
+  };
   return l;
+}
+
+// Arena settings, kept so a lane can be restarted or swapped later.
+const session = {};
+
+function restartLane(old, model) {
+  old.dead = true;
+  old.halt(true);
+  const l = makeLane(model, old.el);
+  old.el.remove();
+  l.makeSolo();
+  l.log(`(restarted${model != old.model ? ` in place of ${old.model}` : ''})`);
+  l.ready.then(() => runAgent(session.key, l, model, systemPrompt(session.turns, CONTEXT.arena, session.dare), session.turns));
+}
+
+// Links that open a pre-filled GitHub issue, so people can suggest a model for the shared lists.
+function showSuggest(l) {
+  const p = l.el.querySelector('.suggest');
+  if (!l.model || p.childElementCount) return;
+  const status = l.el.querySelector('.state span').textContent;
+  const link = (label, kind) => {
+    const a = document.createElement('a');
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = label;
+    a.href = 'https://github.com/SoulFireMage/blankaiarena/issues/new?' + new URLSearchParams({
+      title: `${kind}: ${l.model}`,
+      body: `Model: ${l.model}\nSuggestion: ${kind}\nWhat happened (what did it make, how did it behave?):\n\n\nIts lane said: ${status}\n`,
+    });
+    return a;
+  };
+  p.append(link('suggest ★ favourite', 'favourite'), link('suggest ⚠ avoid', 'avoid'));
 }
 
 function evalIn(l, code) {
@@ -195,7 +276,7 @@ function evalIn(l, code) {
     const done = msg => { removeEventListener('message', h); l.pending = null; resolve(msg); };
     const h = e => { if (e.source === l.frame.contentWindow && e.data?.id === id) done(e.data); };
     addEventListener('message', h);
-    l.pending = () => done({ ok: false, out: '{"error":"stopped by user"}' });
+    l.pending = (out = '{"error":"stopped by user"}') => done({ ok: false, out });
     l.frame.contentWindow.postMessage({ id, code }, '*');
   });
 }
@@ -264,15 +345,23 @@ async function runAgent(key, l, model, system, turns, resume) {
   const conversation = resume?.conversation || [{ role: 'system', content: system }, { role: 'user', content: 'Begin.' }];
   let empty = 0;
   const fail = ([kind, short, detail]) => { l.status(kind, short); l.log(`${model} ✗ ${short}: ${detail}`); };
-  // In arena mode a finished lane can be nudged: same conversation, a note from the user, more turns if needed.
-  const nudgeable = t => l.solo && l.offerNudge(() => {
+  l.model = model;
+  // In arena mode a lane that stopped for any reason can carry on, in the same conversation.
+  // nudge: it finished, ran out of turns or was stopped; add a note and more turns if needed.
+  const nudgeable = t => !l.dead && l.solo && l.offer('nudge', 'ask the model to keep going', () => {
     const more = Math.max(turns - t, 10), total = t + more;
     conversation.push({ role: 'user', content: `The user pressed "nudge": they would like you to keep going. You have ${more} more turns.` });
     l.log(`${model}: nudged, ${more} more turns`);
     runAgent(key, l, model, system, total, { conversation, t: t + 1 });
   });
+  // retry: a request failed; try the same turn again.
+  const retryable = t => !l.dead && l.solo && l.offer('retry', 'try this turn again', () => {
+    l.log(`${model}: retrying turn ${t}`);
+    runAgent(key, l, model, system, turns, { conversation, t });
+  });
+  const failAt = (t, problem) => { fail(problem); retryable(t); };
   l.skip = false;
-  l.hideNudge?.();
+  l.hideOffer?.();
   if (!resume) l.log(`${model}: starting, ${turns} turns`);
   let t = resume?.t || 1;
   for (; t <= turns && !l.skip; t++) {
@@ -327,8 +416,9 @@ async function runAgent(key, l, model, system, turns, resume) {
       if (l.skip) break;
     }
     if (!response) {
-      if (l.skip) { l.status('done', 'stopped'); l.log(`${model}: stopped`); return; }
-      return fail(problem);
+      if (l.dead) return;
+      if (l.skip) { l.status('done', 'stopped'); l.log(`${model}: stopped`); nudgeable(t - 1); return; }
+      return failAt(t, problem);
     }
     l.tokens += response.usage?.total_tokens || 0;
     l.log(`turn ${t}: replied after ${Math.round((Date.now() - t0) / 1000)}s`);
@@ -340,7 +430,7 @@ async function runAgent(key, l, model, system, turns, resume) {
     const hasText = response.output.some(i => i.role == 'assistant' && i.content?.some(c => c.type == 'output_text'));
     if (!hasText) {
       l.log(`turn ${t}: the reply had no code in it`);
-      if (++empty >= 3) return fail(['model', 'model sends nothing', 'three replies in a row with no code in them']);
+      if (++empty >= 3) return failAt(t + 1, ['model', 'model sends nothing', 'three replies in a row with no code in them']);
     } else empty = 0;
     for (const item of response.output) {
       if (item.role != 'assistant') continue;
@@ -350,12 +440,20 @@ async function runAgent(key, l, model, system, turns, resume) {
         const r0 = Date.now(), running = () => {
           const secs = Math.round((Date.now() - r0) / 1000);
           l.status('working', `running its code${secs > 10 ? ` ${secs}s · may be waiting for you` : ''} · turn ${t}/${turns}`);
+          // waiting on you (an age gate, a question...)? nudge lets the model carry on without an answer
+          if (secs == 15 && l.solo) l.offer('nudge', 'carry on without answering', () => {
+            l.log(`turn ${t}: nudged instead of answering`);
+            l.pending?.(JSON.stringify({ error: 'The user pressed "nudge" instead of answering. They would like you to carry on: try something else.' }));
+          });
         };
         running();
         const runTicker = setInterval(running, 1000);
-        const { ok, done, src, out } = await evalIn(l, code);
+        const { ok, ran, done, src, out } = await evalIn(l, code);
         clearInterval(runTicker);
-        if (ok) l.steps.push(src || code);
+        l.hideOffer();
+        if (l.dead) return;
+        // keep every step that ran, even if it threw part-way: its side effects are on the page
+        if (ran ?? ok) l.steps.push(src || code);
         if (code != content.text.trim()) l.log(`turn ${t}: took the code out of its wrapper`);
         l.log(`turn ${t}: code: ${code.replace(/\s+/g, ' ').slice(0, 90)}`);
         let brief = '';
@@ -373,12 +471,14 @@ async function runAgent(key, l, model, system, turns, resume) {
       }
     }
   }
+  if (l.dead) return;
   l.status('done', `${l.skip ? 'stopped' : 'out of turns'} · ${kTok(l.tokens)}`);
   l.log(`${model}: ${l.skip ? 'stopped' : 'used all its turns'}`);
-  if (!l.skip) nudgeable(t - 1);
+  nudgeable(t - 1);
 }
 
 async function arena(key, { models = DEFAULT_MODELS, turns = 40, dare = '', mode = 'arena' } = {}) {
+  Object.assign(session, { key, turns, dare });
   if (mode == 'relay') {
     const l = makeLane('relay: ' + models.join(' → '));
     await l.ready;
@@ -391,7 +491,7 @@ async function arena(key, { models = DEFAULT_MODELS, turns = 40, dare = '', mode
   }
   await Promise.all(models.map(async model => {
     const l = makeLane(model);
-    l.solo = true;
+    l.makeSolo();
     await l.ready;
     await runAgent(key, l, model, systemPrompt(turns, CONTEXT.arena, dare), turns);
   }));
@@ -401,7 +501,7 @@ function exportReplay(l) {
   const steps = JSON.stringify(l.steps).replace(/</g, '\\u003c');
   const title = l.title.replace(/</g, '&lt;');
   const html = `<!doctype html><meta charset="utf-8"><title>${title}: replay</title><script>
-// What ${title} did with a blank page: its successful actions, re-run in order.
+// What ${title} did with a blank page: every step that ran, re-run in order.
 // No model and no key. A step that waited for user input will wait for you too.
 const steps = ${steps};
 const done = note => note;
@@ -430,7 +530,9 @@ addEventListener('load', async () => { for (const s of steps) {
     <input id="find" placeholder="search, or just scroll and tap" autocomplete="off">
     <div id="matches"><div class="empty">loading models…</div></div>
     <p style="color:#777; font-size: 12px; margin-top: 4px">Numbers are the Artificial Analysis intelligence
-      index (higher is smarter; – means no score yet). Prices are per million tokens in / out.</p>
+      index (higher is smarter; – means no score yet). Prices are per million tokens in / out.
+      ★ and ⚠ are shared notes from <a href="https://github.com/SoulFireMage/blankaiarena/blob/main/curation.json"
+      style="color:#9cf">curation.json</a>; suggest changes from a lane's log.</p>
   </div>
   <input name="dare" placeholder="a dare (optional)">
   <select name="mode"><option value="arena">side by side</option><option value="relay">relay: one page, passed hand to hand</option></select>
@@ -461,8 +563,19 @@ try { picked = JSON.parse(localStorage.getItem('arena.models')) || []; } catch {
 if (!Array.isArray(picked) || !picked.length) picked = [...DEFAULT_MODELS];
 try { level = localStorage.getItem('arena.level') || 'all'; } catch {}
 
+// Shared favourites / avoid lists with notes, from curation.json in the repo.
+// Suggestions arrive as GitHub issues (links in each lane's log), and someone edits the file.
+let curation = { favourites: {}, avoid: {}, notes: {} };
+const mark = id => curation.favourites[id] != null ? '★ ' : curation.avoid[id] != null ? '⚠ ' : '';
+const noteFor = id => curation.favourites[id] ?? curation.avoid[id] ?? curation.notes[id] ?? '';
+fetch('curation.json').then(r => r.json()).then(c => {
+  curation = { favourites: {}, avoid: {}, notes: {}, ...c };
+  showMatches();
+}).catch(() => {});
+
 const LEVELS = [
   ['all', 'all', () => true],
+  ['fav', '★ favourites', m => curation.favourites[m.id] != null],
   ['top', 'top · 50+', m => m.score >= 50],
   ['strong', 'strong · 40s', m => m.score >= 40 && m.score < 50],
   ['good', 'good · 30s', m => m.score >= 30 && m.score < 40],
@@ -519,7 +632,7 @@ function showLevels() {
     // prefer makers not already in the arena, so the four are as different as possible
     const makers = new Set(picked.map(id => id.split('/')[0]));
     // skip the very expensive ones: a long run on a $50/M model can empty a small key; they can still be tapped
-    const pool = matches().filter(m => !picked.includes(m.id) && m.score != null && !(m.out > 15));
+    const pool = matches().filter(m => !picked.includes(m.id) && m.score != null && !(m.out > 15) && curation.avoid[m.id] == null);
     const chosen = [];
     for (const fresh of [true, false])
       for (const m of pool) {
@@ -550,15 +663,15 @@ function showMatches() {
   box.replaceChildren(...list.map(m => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = picked.includes(m.id) ? 'on' : '';
-    b.title = m.score == null ? 'no intelligence score published' : 'Artificial Analysis intelligence index';
+    b.className = (picked.includes(m.id) ? 'on' : '') + (curation.avoid[m.id] != null ? ' dim' : '');
+    b.title = noteFor(m.id) || (m.score == null ? 'no intelligence score published' : 'Artificial Analysis intelligence index');
     const score = document.createElement('span');
     score.className = 'score' + (m.score == null ? ' none' : '');
     score.textContent = m.score == null ? '–' : Math.floor(m.score);   // floor, so 49.9 reads as a 40s model
     const name = document.createElement('span');
-    name.textContent = (picked.includes(m.id) ? '✓ ' : '') + m.name;
+    name.textContent = (picked.includes(m.id) ? '✓ ' : '') + mark(m.id) + m.name;
     const small = document.createElement('small');
-    small.textContent = [m.id, priceLabel(m)].filter(Boolean).join(' · ');
+    small.textContent = [m.id, priceLabel(m), noteFor(m.id)].filter(Boolean).join(' · ');
     b.append(score, name, small);
     b.onclick = () => toggle(m.id);
     return b;
