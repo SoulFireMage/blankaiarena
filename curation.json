@@ -11,6 +11,7 @@
   "notes": {
     "anthropic/claude-haiku-5.5": "tends to treat the blank page as 'waiting for instructions' and stop; try nudge or a dare",
     "xiaomi/mimo-v2.6-pro": "slow (1-2 minutes per turn) and its provider times out fairly often",
-    "openai/gpt-6-luna": "in one run it waited a long time for input; answer it or press nudge"
+    "openai/gpt-6-luna": "builds a form and waits for you (a 'two minutes' focus timer in one run); nudge works well if you don't want to answer",
+    "deepseek/deepseek-v4.1-flash": "ambitious (WebGL fractals) and fast, but thinks aloud in prose every other turn, which costs turns"
   }
 }

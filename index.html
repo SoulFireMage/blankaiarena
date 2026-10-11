@@ -454,12 +454,19 @@ async function runAgent(key, l, model, system, turns, resume) {
         if (l.dead) return;
         // keep every step that ran, even if it threw part-way: its side effects are on the page
         if (ran ?? ok) l.steps.push(src || code);
-        if (code != content.text.trim()) l.log(`turn ${t}: took the code out of its wrapper`);
-        l.log(`turn ${t}: code: ${code.replace(/\s+/g, ' ').slice(0, 90)}`);
-        let brief = '';
-        try { const r = JSON.parse(out); brief = r.error ? '✗ ' + r.error : '✓'; if (r.backgroundErrors) brief += ` (${r.backgroundErrors.length} background error(s))`; }
-        catch { brief = ok ? '✓' : '✗'; }
-        l.log(`turn ${t}: its code ran ${brief}`.slice(0, 300));
+        const flat = code.replace(/\s+/g, ' ');
+        // A reply that isn't code at all is the model thinking aloud: show it as speech.
+        // (It still gets the syntax error back, so it learns to send code.)
+        if (ran === false && (flat.match(/\b[a-z']{2,} [a-z']{2,} [a-z']{2,}\b/gi) || []).length >= 2) {
+          l.log(`turn ${t}: it said, instead of code: "${flat.slice(0, 220)}${flat.length > 220 ? '…' : ''}"`);
+        } else {
+          if (code != content.text.trim()) l.log(`turn ${t}: took the code out of its wrapper`);
+          l.log(`turn ${t}: code: ${flat.slice(0, 90)}`);
+          let brief = '';
+          try { const r = JSON.parse(out); brief = r.error ? '✗ ' + r.error : '✓'; if (r.backgroundErrors) brief += ` (${r.backgroundErrors.length} background error(s))`; }
+          catch { brief = ok ? '✓' : '✗'; }
+          l.log(`turn ${t}: its code ran ${brief}`.slice(0, 300));
+        }
         conversation.push({ type: 'message', role: 'user', content: out });
         console.log(model, out);
         if (done) {
